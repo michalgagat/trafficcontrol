@@ -22,6 +22,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -286,24 +287,18 @@ func UpdateHandler(updater Updater) http.HandlerFunc {
 	}
 }
 
-// DeleteHandler creates a handler function from the pointer to a struct implementing the Deleter interface
-//   this generic handler encapsulates the logic for handling:
-//   *fetching the id from the path parameter
-//   *current user
-//   *change log entry
-//   *forming and writing the body over the wire
-func DeleteHandler(deleter Deleter) http.HandlerFunc {
+func deleteHandlerHelper(deleter Deleter, errHandler func(w http.ResponseWriter, r *http.Request, tx *sql.Tx, statusCode int, userErr error, sysErr error), successWriter func(w http.ResponseWriter, r *http.Request, d Deleter)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		inf, userErr, sysErr, errCode := NewInfo(r, nil, nil)
 		if userErr != nil || sysErr != nil {
-			HandleErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
+			errHandler(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
 			return
 		}
 		defer inf.Close()
 
 		interfacePtr := reflect.ValueOf(deleter)
 		if interfacePtr.Kind() != reflect.Ptr {
-			HandleErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("reflect: can only indirect from a pointer"))
+			errHandler(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("reflect: can only indirect from a pointer"))
 			return
 		}
 		objectType := reflect.Indirect(interfacePtr).Type()
@@ -312,7 +307,7 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 
 		isOptionsDeleter, userErr, sysErr, errCode := checkIfOptionsDeleter(obj, inf.Params)
 		if userErr != nil || sysErr != nil {
-			HandleErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
+			errHandler(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
 			return
 		}
 		var (
@@ -328,12 +323,12 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 				switch reflect.ValueOf(info.Checker) {
 				case reflect.ValueOf(IsInt):
 					if keys[key], err = GetIntKey(paramKey); err != nil {
-						HandleErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+key), nil)
+						errHandler(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+key), nil)
 						return
 					}
 				case reflect.ValueOf(IsBool):
 					if keys[key], err = strconv.ParseBool(paramKey); err != nil {
-						HandleErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+key), nil)
+						errHandler(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+key), nil)
 						return
 					}
 				default:
@@ -345,13 +340,13 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 			for _, kf := range keyFields {
 				paramKey := inf.Params[kf.Field]
 				if paramKey == "" {
-					HandleErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("missing key: "+kf.Field), nil)
+					errHandler(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("missing key: "+kf.Field), nil)
 					return
 				}
 
 				paramValue, err := kf.Func(paramKey)
 				if err != nil {
-					HandleErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+kf.Field), nil)
+					errHandler(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+kf.Field), nil)
 					return
 				}
 				keys[kf.Field] = paramValue
@@ -362,11 +357,11 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 		if t, ok := obj.(Tenantable); ok {
 			authorized, err := t.IsTenantAuthorized(inf.User)
 			if err != nil {
-				HandleErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("checking tenant authorized: "+err.Error()))
+				errHandler(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("checking tenant authorized: "+err.Error()))
 				return
 			}
 			if !authorized {
-				HandleErr(w, r, inf.Tx.Tx, http.StatusForbidden, errors.New("not authorized on this tenant"), nil)
+				errHandler(w, r, inf.Tx.Tx, http.StatusForbidden, errors.New("not authorized on this tenant"), nil)
 				return
 			}
 		}
@@ -379,17 +374,29 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 			userErr, sysErr, errCode = obj.Delete()
 		}
 		if userErr != nil || sysErr != nil {
-			HandleErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
+			errHandler(w, r, inf.Tx.Tx, errCode, userErr, sysErr)
 			return
 		}
 
 		log.Debugf("changelog for delete on object")
 		if err := CreateChangeLog(ApiChange, Deleted, obj, inf.User, inf.Tx.Tx); err != nil {
-			HandleErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("inserting changelog: "+err.Error()))
+			errHandler(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("inserting changelog: "+err.Error()))
 			return
 		}
-		WriteRespAlert(w, r, tc.SuccessLevel, obj.GetType()+" was deleted.")
+		successWriter(w, r, obj)
 	}
+}
+
+// DeleteHandler creates a handler function from the pointer to a struct implementing the Deleter interface
+//   this generic handler encapsulates the logic for handling:
+//   *fetching the id from the path parameter
+//   *current user
+//   *change log entry
+//   *forming and writing the body over the wire
+func DeleteHandler(deleter Deleter) http.HandlerFunc {
+	return deleteHandlerHelper(deleter, HandleErr, func(w http.ResponseWriter, r *http.Request, d Deleter) {
+		WriteRespAlert(w, r, tc.SuccessLevel, d.GetType()+" was deleted.")
+	})
 }
 
 // DeprecatedDeleteHandler creates a handler function from the pointer to a struct implementing the Deleter interface with a optional deprecation notice
@@ -399,106 +406,17 @@ func DeleteHandler(deleter Deleter) http.HandlerFunc {
 //   *change log entry
 //   *forming and writing the body over the wire
 func DeprecatedDeleteHandler(deleter Deleter, alternative *string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		inf, userErr, sysErr, errCode := NewInfo(r, nil, nil)
-		if userErr != nil || sysErr != nil {
-			HandleDeprecatedErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr, alternative)
-			return
-		}
-		defer inf.Close()
-
-		interfacePtr := reflect.ValueOf(deleter)
-		if interfacePtr.Kind() != reflect.Ptr {
-			HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("reflect: can only indirect from a pointer"), alternative)
-			return
-		}
-		objectType := reflect.Indirect(interfacePtr).Type()
-		obj := reflect.New(objectType).Interface().(Deleter)
-		obj.SetInfo(inf)
-
-		isOptionsDeleter, userErr, sysErr, errCode := checkIfOptionsDeleter(obj, inf.Params)
-		if userErr != nil || sysErr != nil {
-			HandleDeprecatedErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr, alternative)
-			return
-		}
-		var (
-			keys = make(map[string]interface{})
-			err  error
-		)
-		if isOptionsDeleter {
-			for key, info := range obj.(OptionsDeleter).DeleteKeyOptions() {
-				paramKey := inf.Params[key]
-				if paramKey == "" {
-					continue
-				}
-				switch reflect.ValueOf(info.Checker) {
-				case reflect.ValueOf(IsInt):
-					if keys[key], err = GetIntKey(paramKey); err != nil {
-						HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("missing key: "+key), nil, alternative)
-						return
-					}
-				case reflect.ValueOf(IsBool):
-					if keys[key], err = strconv.ParseBool(paramKey); err != nil {
-						HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+key), nil, alternative)
-						return
-					}
-				default:
-					keys[key] = paramKey
-				}
-			}
-		} else {
-			keyFields := obj.GetKeyFieldsInfo() // expecting a slice of the key fields info which is a struct with the field name and a function to convert a string into a interface{} of the right type. in most that will be [{Field:"id",Func: func(s string)(interface{},error){return strconv.Atoi(s)}}]
-			for _, kf := range keyFields {
-				paramKey := inf.Params[kf.Field]
-				if paramKey == "" {
-					HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("missing key: "+kf.Field), nil, alternative)
-					return
-				}
-
-				paramValue, err := kf.Func(paramKey)
-				if err != nil {
-					HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusBadRequest, errors.New("failed to parse key: "+kf.Field), nil, alternative)
-					return
-				}
-				keys[kf.Field] = paramValue
-			}
-		}
-		obj.SetKeys(keys) // if the type assertion of a key fails it will be should be set to the zero value of the type and the delete should fail (this means the code is not written properly no changes of user input should cause this.)
-
-		if t, ok := obj.(Tenantable); ok {
-			authorized, err := t.IsTenantAuthorized(inf.User)
-			if err != nil {
-				HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("checking tenant authorized: "+err.Error()), alternative)
-				return
-			}
-			if !authorized {
-				HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusForbidden, errors.New("not authorized on this tenant"), nil, alternative)
-				return
-			}
-		}
-
-		if isOptionsDeleter {
-			obj := reflect.New(objectType).Interface().(OptionsDeleter)
-			obj.SetInfo(inf)
-			userErr, sysErr, errCode = obj.OptionsDelete()
-		} else {
-			userErr, sysErr, errCode = obj.Delete()
-		}
-
-		if userErr != nil || sysErr != nil {
-			HandleDeprecatedErr(w, r, inf.Tx.Tx, errCode, userErr, sysErr, alternative)
-			return
-		}
-
-		log.Debugf("changelog for delete on object")
-		if err := CreateChangeLog(ApiChange, Deleted, obj, inf.User, inf.Tx.Tx); err != nil {
-			HandleDeprecatedErr(w, r, inf.Tx.Tx, http.StatusInternalServerError, nil, errors.New("inserting changelog: "+err.Error()), alternative)
-			return
-		}
+	return deleteHandlerHelper(deleter, newDeprecatedErrHandler(alternative), func(w http.ResponseWriter, r *http.Request, d Deleter) {
 		alerts := CreateDeprecationAlerts(alternative)
-		alerts.AddNewAlert(tc.SuccessLevel, obj.GetType()+" was deleted.")
+		alerts.AddNewAlert(tc.SuccessLevel, d.GetType()+" was deleted.")
 
 		WriteAlerts(w, r, http.StatusOK, alerts)
+	})
+}
+
+func newDeprecatedErrHandler(alternative *string) func(w http.ResponseWriter, r *http.Request, tx *sql.Tx, statusCode int, userErr error, sysErr error) {
+	return func(w http.ResponseWriter, r *http.Request, tx *sql.Tx, statusCode int, userErr error, sysErr error) {
+		HandleDeprecatedErr(w, r, tx, statusCode, userErr, sysErr, alternative)
 	}
 }
 
