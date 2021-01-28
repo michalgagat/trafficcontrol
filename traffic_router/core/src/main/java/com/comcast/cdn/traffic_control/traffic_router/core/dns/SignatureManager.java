@@ -25,6 +25,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +41,7 @@ import org.apache.log4j.Logger;
 import org.xbill.DNS.DSRecord;
 import org.xbill.DNS.Name;
 import org.xbill.DNS.Record;
+import org.xbill.DNS.RRSIGRecord;
 import org.xbill.DNS.TextParseException;
 import com.comcast.cdn.traffic_control.traffic_router.core.edge.CacheRegister;
 import com.comcast.cdn.traffic_control.traffic_router.core.dns.ZoneManager.ZoneCacheType;
@@ -50,6 +53,8 @@ public final class SignatureManager {
 	private static final Logger LOGGER = Logger.getLogger(SignatureManager.class);
 	private int expirationMultiplier;
 	private CacheRegister cacheRegister;
+	private static ConcurrentMap<RRSIGCacheKey, ConcurrentMap<RRsetKey, RRSIGRecord>> RRSIGCache = new ConcurrentHashMap<>();
+	private boolean RRSIGCacheEnabled = false;
 	private static ScheduledExecutorService keyMaintenanceExecutor;
 	private TrafficOpsUtils trafficOpsUtils;
 	private boolean dnssecEnabled = false;
@@ -64,6 +69,7 @@ public final class SignatureManager {
 		this.setCacheRegister(cacheRegister);
 		this.setTrafficOpsUtils(trafficOpsUtils);
 		this.setZoneManager(zoneManager);
+		setRRSIGCacheEnabled(cacheRegister.getConfig());
 		initKeyMap();
 	}
 
@@ -71,6 +77,15 @@ public final class SignatureManager {
 		if (keyMaintenanceExecutor != null) {
 			keyMaintenanceExecutor.shutdownNow();
 		}
+	}
+
+	private void setRRSIGCacheEnabled(final JsonNode config) {
+		// TODO: change default to false when done testing
+		this.RRSIGCacheEnabled = JsonUtils.optBoolean(config, TrafficRouter.DNSSEC_RRSIG_CACHE_ENABLED, true);
+	}
+
+	private boolean isRRSIGCacheEnabled() {
+		return this.RRSIGCacheEnabled;
 	}
 
 	private void initKeyMap() {
@@ -111,6 +126,7 @@ public final class SignatureManager {
 		return new Runnable() {
 			public void run() {
 				try {
+					// TODO: also use this Runnable to maintain the RRSIG cache (remove entries for keys that no longer exist)
 					trafficRouterManager.trackEvent("lastDnsSecKeysCheck");
 
 					final Map<String, List<DnsSecKeyPair>> newKeyMap = new HashMap<String, List<DnsSecKeyPair>>();
@@ -447,7 +463,8 @@ public final class SignatureManager {
 
 				final ZoneSigner zoneSigner = new ZoneSignerImpl();
 
-				signedRecords = zoneSigner.signZone(name, records, kskPairs, zskPairs, start.getTime(), signatureExpiration.getTime(), true, DSRecord.SHA256_DIGEST_ID);
+				signedRecords = zoneSigner.signZone(name, records, kskPairs, zskPairs, start.getTime(),
+						signatureExpiration.getTime(), true, DSRecord.SHA256_DIGEST_ID, isRRSIGCacheEnabled() ? RRSIGCache : null);
 
 				zoneKey.setSignatureExpiration(signatureExpiration);
 				zoneKey.setKSKExpiration(kskExpiration);

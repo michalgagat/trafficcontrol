@@ -44,6 +44,7 @@ public class SignedZoneKey extends ZoneKey {
 	}
 
 	public long getRefreshHorizon() {
+		// TODO: handle the fact that RRSIG records won't all have the same inception/expiration
 		return getTimestamp() + Math.round((double) getSignatureDuration() / 2.0); // force a refresh when we're halfway through our validity period
 	}
 

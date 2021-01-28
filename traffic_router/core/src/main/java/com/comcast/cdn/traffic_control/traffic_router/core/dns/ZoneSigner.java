@@ -19,14 +19,17 @@ import org.xbill.DNS.DNSKEYRecord;
 import org.xbill.DNS.DSRecord;
 import org.xbill.DNS.Name;
 import org.xbill.DNS.Record;
+import org.xbill.DNS.RRSIGRecord;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ConcurrentMap;
 
 public interface ZoneSigner {
 	List<Record> signZone(Name name, List<Record> records, List<DnsSecKeyPair> kskPairs, List<DnsSecKeyPair> zskPairs,
-	                      Date inception, Date expiration, boolean fullySignKeySet, int digestId) throws IOException, GeneralSecurityException;
+						  Date inception, Date expiration, boolean fullySignKeySet, int digestId,
+						  ConcurrentMap<RRSIGCacheKey, ConcurrentMap<RRsetKey, RRSIGRecord>> RRSIGCache) throws IOException, GeneralSecurityException;
 	DSRecord calculateDSRecord(DNSKEYRecord dnskeyRecord, int digestId, long ttl);
 }
