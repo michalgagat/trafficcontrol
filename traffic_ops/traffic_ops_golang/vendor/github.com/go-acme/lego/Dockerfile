@@ -7,7 +7,7 @@ WORKDIR /go/src/github.com/go-acme/lego
 COPY . .
 RUN make build
 
-FROM alpine:3.9
+FROM alpine:3.12.6
 RUN apk update \
     && apk add --no-cache ca-certificates tzdata \
     && update-ca-certificates
